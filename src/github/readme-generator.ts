@@ -1,55 +1,12 @@
-import { ProblemMetadata, Settings } from '../storage/types';
+import { ProblemMetadata, Settings, SubmissionEntry } from '../storage/types';
+import { problemDirectory, solutionPath } from './paths';
+
+export const DESCRIPTION_START = '<!-- commitcode:description:start -->';
+export const DESCRIPTION_END = '<!-- commitcode:description:end -->';
 
 export class ReadmeGenerator {
-  private getExtensionByLanguage(language: string): string {
-    const map: Record<string, string> = {
-      'cpp': 'cpp', 'c++': 'cpp',
-      'java': 'java',
-      'python': 'py', 'python3': 'py', 'python 3': 'py',
-      'javascript': 'js',
-      'typescript': 'ts',
-      'csharp': 'cs', 'c#': 'cs',
-      'c': 'c',
-      'ruby': 'rb',
-      'swift': 'swift',
-      'golang': 'go', 'go': 'go',
-      'rust': 'rs',
-      'kotlin': 'kt',
-      'php': 'php',
-      'scala': 'scala',
-      'mysql': 'sql', 'mssql': 'sql', 'oraclesql': 'sql', 'sql': 'sql'
-    };
-    return map[language.toLowerCase()] || 'txt';
-  }
-
   private resolvePath(problem: ProblemMetadata, settings: Settings): string {
-    const paddedId = problem.id.toString().padStart(4, '0');
-    const safeTitle = problem.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-    const ext = this.getExtensionByLanguage(problem.language);
-
-    // Default to version 1 if not set
-    const version = problem.version || 1;
-
-    const baseName = `${paddedId}-${safeTitle}`;
-    const filename = settings.versionMode === 'versioned'
-      ? `${baseName}_v${version}.${ext}`
-      : `${baseName}.${ext}`;
-
-    switch (settings.folderStructure) {
-      case 'Difficulty':
-        return `${problem.difficulty}/${filename}`;
-      case 'Language':
-        return `${problem.language}/${filename}`;
-      case 'Number':
-        const paddedIdFolder = problem.id.toString().padStart(4, '0');
-        return `${paddedIdFolder}/${filename}`;
-      case 'Flat':
-        return filename;
-      case 'Topic':
-        return `${problem.difficulty}/${filename}`;
-      default:
-        return `${problem.difficulty}/${filename}`;
-    }
+    return solutionPath(problem, problem.version || 1, settings.folderStructure, settings.versionMode);
   }
 
   public generate(settings: Settings, allProblems: ProblemMetadata[]): string {
@@ -124,5 +81,56 @@ ${rows.join('\n')}
 `;
 
     return markdown;
+  }
+
+  /**
+   * README.md that sits in a problem's own folder (nested layout):
+   * title, difficulty, topics, problem statement, and a table of every submission.
+   *
+   * @param entries every metadata entry for this problem id (one per language)
+   * @param description problem statement HTML; when missing, pass the previous one
+   */
+  public generateProblemReadme(entries: ProblemMetadata[], description: string | null): string {
+    const head = entries[0];
+    const dir = problemDirectory(head);
+
+    const submissions: SubmissionEntry[] = entries
+      .flatMap(e => e.history ?? [])
+      .sort((a, b) => a.submissionTime - b.submissionTime);
+
+    const tags = Array.from(new Set(entries.flatMap(e => e.tags ?? [])));
+    const meta = [`**Difficulty:** ${head.difficulty}`];
+    if (tags.length) meta.push(`**Topics:** ${tags.join(', ')}`);
+
+    const rows = submissions.map(s => {
+      const rel = s.path.startsWith(`${dir}/`) ? s.path.slice(dir.length + 1) : s.path;
+      const link = rel.split('/').map(encodeURIComponent).join('/');
+      const date = new Date(s.submissionTime).toISOString().slice(0, 10);
+      return `| [v${s.version}](./${link}) | ${s.language} | ${s.runtime || 'N/A'} | ${s.memory || 'N/A'} | ${date} |`;
+    });
+
+    return `# [${head.id}. ${head.title}](${head.url})
+
+${meta.join(' · ')}
+
+${DESCRIPTION_START}
+${description ?? '_Problem statement not captured._'}
+${DESCRIPTION_END}
+
+## Submissions
+
+| Version | Language | Runtime | Memory | Date |
+|---------|----------|---------|--------|------|
+${rows.join('\n')}
+`;
+  }
+
+  /** Pull the problem statement back out of an existing problem README. */
+  public static extractDescription(readme: string): string | null {
+    const start = readme.indexOf(DESCRIPTION_START);
+    const end = readme.indexOf(DESCRIPTION_END);
+    if (start === -1 || end === -1 || end < start) return null;
+    const body = readme.slice(start + DESCRIPTION_START.length, end).trim();
+    return body && body !== '_Problem statement not captured._' ? body : null;
   }
 }

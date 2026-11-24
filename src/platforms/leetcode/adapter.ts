@@ -109,8 +109,10 @@ export class LeetCodeAdapter implements PlatformAdapter {
             memory: data.status_memory,
             submissionTime: Date.now(),
             code: code,
-            url: window.location.href,
+            url: meta?.titleSlug ? `https://leetcode.com/problems/${meta.titleSlug}/` : window.location.href,
             version: 1,
+            description: meta?.content || undefined,
+            tags: Array.isArray(meta?.topicTags) ? meta.topicTags.map((t: { name: string }) => t.name) : undefined,
           } as ProblemRecord);
         });
       } else {
@@ -154,7 +156,10 @@ export class LeetCodeAdapter implements PlatformAdapter {
           question(titleSlug: $titleSlug) {
             questionFrontendId
             title
+            titleSlug
             difficulty
+            content
+            topicTags { name }
           }
         }
       `;
@@ -178,7 +183,7 @@ export class LeetCodeAdapter implements PlatformAdapter {
       
       console.log(`[CommitCode] GraphQL response status: ${res.status}`);
       const rawText = await res.text();
-      console.log(`[CommitCode] GraphQL raw response body:`, rawText);
+      console.log(`[CommitCode] GraphQL response received (${rawText.length} chars)`);
       
       if (!res.ok) {
         throw new Error(`HTTP Error ${res.status}`);

@@ -1,7 +1,8 @@
 import { db } from '../storage/db';
-import { ProblemRecord } from '../storage/types';
+import { ProblemMetadata, ProblemRecord } from '../storage/types';
 import { GitHubClient, GitHubError } from '../github/client';
 import { ReadmeGenerator } from '../github/readme-generator';
+import { getExtensionByLanguage, problemDirectory, problemSlug, solutionPath, usesProblemReadme } from '../github/paths';
 
 export class SyncEngine {
   /**
@@ -45,34 +46,11 @@ export class SyncEngine {
 
   /** File-safe slug used both for the target path and the success toast. */
   private buildSlug(problem: ProblemRecord): string {
-    const paddedId = problem.id.toString().padStart(4, '0');
-    const safeTitle = problem.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-    return `${paddedId}-${safeTitle}`;
-  }
-
-  private getExtensionByLanguage(language: string): string {
-    const map: Record<string, string> = {
-      'cpp': 'cpp', 'c++': 'cpp', 
-      'java': 'java', 
-      'python': 'py', 'python3': 'py', 'python 3': 'py',
-      'javascript': 'js', 
-      'typescript': 'ts', 
-      'csharp': 'cs', 'c#': 'cs', 
-      'c': 'c',
-      'ruby': 'rb', 
-      'swift': 'swift', 
-      'golang': 'go', 'go': 'go',
-      'rust': 'rs',
-      'kotlin': 'kt', 
-      'php': 'php', 
-      'scala': 'scala', 
-      'mysql': 'sql', 'mssql': 'sql', 'oraclesql': 'sql', 'sql': 'sql'
-    };
-    return map[language.toLowerCase()] || 'txt';
+    return problemSlug(problem);
   }
 
   private generateHeaderComment(problem: ProblemRecord): string {
-    const ext = this.getExtensionByLanguage(problem.language);
+    const ext = getExtensionByLanguage(problem.language);
     const dateStr = new Date(problem.submissionTime).toLocaleDateString();
     
     const lines = [
@@ -94,30 +72,7 @@ export class SyncEngine {
   }
 
   private resolvePath(problem: ProblemRecord, version: number, structure: string, versionMode: 'versioned' | 'overwrite' = 'versioned'): string {
-    // Format the title to be safe for filenames
-    const paddedId = problem.id.toString().padStart(4, '0');
-    const safeTitle = problem.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-    const ext = this.getExtensionByLanguage(problem.language);
-    const baseName = `${paddedId}-${safeTitle}`;
-    const filename = versionMode === 'versioned' 
-      ? `${baseName}_v${version}.${ext}`
-      : `${baseName}.${ext}`;
-
-    switch (structure) {
-      case 'Difficulty':
-        return `${problem.difficulty}/${filename}`;
-      case 'Language':
-        return `${problem.language}/${filename}`;
-      case 'Number':
-        const paddedId = problem.id.toString().padStart(4, '0');
-        return `${paddedId}/${filename}`;
-      case 'Flat':
-        return filename;
-      case 'Topic':
-        return `${problem.difficulty}/${filename}`; // Topic not extracted yet
-      default:
-        return `${problem.difficulty}/${filename}`;
-    }
+    return solutionPath(problem, version, structure, versionMode);
   }
 
   private async hash(text: string): Promise<string> {
@@ -202,10 +157,8 @@ export class SyncEngine {
 
         try {
           const files = await client.listDirectory(directory);
-          const paddedId = problem.id.toString().padStart(4, '0');
-          const safeTitle = problem.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-          const ext = this.getExtensionByLanguage(problem.language);
-          const regex = new RegExp(`^${paddedId}-${safeTitle}_v(\\d+)\\.${ext}$`);
+          const ext = getExtensionByLanguage(problem.language);
+          const regex = new RegExp(`^${problemSlug(problem)}_v(\\d+)\\.${ext}$`);
           
           let maxVersion = 0;
           for (const file of files) {
@@ -263,9 +216,22 @@ export class SyncEngine {
           });
         }
 
-        // Include current problem
-        const { code: _code, ...currentMeta } = problem;
+        // Include current problem, carrying its submission history forward
+        const { code: _code, description: _description, ...currentMeta } = problem;
         const index = remoteMetadata.findIndex(p => p.id === currentMeta.id && p.language === currentMeta.language);
+        const previousHistory = index >= 0 ? (remoteMetadata[index].history ?? []) : [];
+        currentMeta.history = [
+          ...previousHistory,
+          {
+            version,
+            language: problem.language,
+            runtime: problem.runtime,
+            memory: problem.memory,
+            submissionTime: problem.submissionTime,
+            path: targetPath,
+          },
+        ];
+        if (!currentMeta.tags?.length && index >= 0) currentMeta.tags = remoteMetadata[index].tags;
         if (index >= 0) {
           remoteMetadata[index] = currentMeta;
         } else {
@@ -281,6 +247,26 @@ export class SyncEngine {
         if (readmeContent) {
           filesToCommit.push({ path: 'README.md', content: readmeContent });
         }
+
+        // Per-problem README (nested layout): statement + every submission
+        if (usesProblemReadme(structure)) {
+          const problemReadmePath = `${problemDirectory(problem)}/README.md`;
+          let description = problem.description || null;
+          if (!description) {
+            // Statement wasn't captured this time; keep the one already in the repo
+            try {
+              const existing = await client.getFile(problemReadmePath);
+              description = ReadmeGenerator.extractDescription(decodeURIComponent(escape(atob(existing.content.replace(/\n/g, '')))));
+            } catch (e: any) {
+              if (e.status !== 404) console.warn('[CommitCode] Could not read existing problem README.', e);
+            }
+          }
+          const entriesForProblem = (remoteMetadata as ProblemMetadata[]).filter(p => p.id === problem.id);
+          filesToCommit.push({
+            path: problemReadmePath,
+            content: readmeGenerator.generateProblemReadme(entriesForProblem, description),
+          });
+        }
       }
       
       console.log(`[CommitCode] Batch committing ${filesToCommit.length} files...`);
@@ -288,7 +274,8 @@ export class SyncEngine {
 
       // 6. On success
       problem.version = version;
-      await db.saveProblem(problem);
+      const { description: _desc, ...toStore } = problem;
+      await db.saveProblem(toStore);
       await db.addLogEntry({
         problemId: problem.id,
         title: problem.title,

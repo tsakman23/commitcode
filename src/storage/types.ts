@@ -11,11 +11,24 @@ export interface ProblemRecord {
   code: string;
   url: string;
   version: number;
+  /** Problem statement HTML from LeetCode. Only used to write the per-problem README; never stored in commitcode.json. */
+  description?: string;
+  /** Every synced submission for this problem + language, oldest first. */
+  history?: SubmissionEntry[];
 }
 
-export type ProblemMetadata = Omit<ProblemRecord, 'code'>;
+export interface SubmissionEntry {
+  version: number;
+  language: string;
+  runtime: string;
+  memory: string;
+  submissionTime: number;
+  path: string;
+}
 
-export type FolderStructure = 'Difficulty' | 'Topic' | 'Language' | 'Number' | 'Flat';
+export type ProblemMetadata = Omit<ProblemRecord, 'code' | 'description'>;
+
+export type FolderStructure = 'Difficulty' | 'Topic' | 'Language' | 'Number' | 'Flat' | 'DifficultyProblemLanguage';
 
 export interface Settings {
   pat: string | null;
